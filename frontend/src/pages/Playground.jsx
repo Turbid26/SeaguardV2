@@ -1,5 +1,5 @@
 import Navbar from "../components/Navbar";
-
+import "./Playground.css";
 import React, { useState, useCallback, useEffect } from "react";
 import ReactFlow, {
   addEdge,
@@ -15,6 +15,14 @@ import MitreTimeline from "../components/MitreTimeline.jsx";
 import KillChain from "../components/KillChain.jsx";
 
 const socket = io("http://localhost:5000");
+
+const classMap = {
+  safe: "node-safe",
+  under_attack: "node-attacked",
+  compromised: "node-attacked",
+  contained: "node-contained",
+  isolated: "node-contained"
+};
 
 // 8 maritime node types
 const MARITIME_NODES = [
@@ -68,6 +76,7 @@ export default function Playgrouund() {
           id,
           type,
           position,
+          className: "node-safe",
           data: {
             label: id.replace("_", " "),
             alert_prob: defaults[type].alert_prob,

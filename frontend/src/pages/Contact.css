@@ -1,0 +1,123 @@
+/* Page background */
+.contact-container {
+  min-height: 100vh;
+  background: linear-gradient(to bottom right, #0f172a, #1e293b);
+  position: relative;
+  padding-top: 40px;
+  color: white;
+  font-family: "Inter", sans-serif;
+}
+
+/* Glass card */
+.contact-card {
+  max-width: 600px;
+  margin: auto;
+  padding: 30px;
+  backdrop-filter: blur(12px);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0 20px rgba(56, 189, 248, 0.2);
+  animation: fadeIn 1s ease-in-out;
+}
+
+.title {
+  font-size: 32px;
+  font-weight: bold;
+  text-align: center;
+}
+
+.subtitle {
+  text-align: center;
+  opacity: 0.8;
+  margin-bottom: 20px;
+}
+
+/* Contact links */
+.contact-info p {
+  font-size: 16px;
+  margin: 8px 0;
+}
+
+.contact-info a {
+  color: #38bdf8;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.contact-info a:hover {
+  text-decoration: underline;
+}
+
+/* Form styles */
+.form-title {
+  margin-top: 20px;
+  font-size: 22px;
+  font-weight: bold;
+}
+
+.contact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.contact-form input,
+.contact-form textarea {
+  width: 100%;
+  padding: 12px;
+  border-radius: 8px;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: white;
+  outline: none;
+}
+
+.contact-form button {
+  padding: 12px;
+  border-radius: 8px;
+  background: #3b82f6;
+  border: none;
+  color: white;
+  cursor: pointer;
+  font-size: 16px;
+  transition: 0.2s;
+}
+
+.contact-form button:hover {
+  background: #2563eb;
+}
+
+/* Maritime wave footer */
+.wave {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 120px;
+  background: url("https://i.imgur.com/ZR3o9iN.png") repeat-x;
+  animation: waveAnim 6s linear infinite;
+  opacity: 0.5;
+}
+
+@keyframes waveAnim {
+  from {
+    background-position-x: 0;
+  }
+  to {
+    background-position-x: 1000px;
+  }
+}
+
+/* Fade in animation */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

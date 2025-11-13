@@ -341,27 +341,28 @@ from flask import send_file
 
 def simulate(scenario, algo):
     """
-    Drop-in simulate replacement.
-
-    - Attacker: chooses among available masks (local, remote, connect, etc.)
-    - Defender: uses MAPPO mapping most of the time, but does stochastic exploration
-                using heuristic/random choices occasionally to add diversity.
-    - Emits event_occurred & killchain_update for KillChain and timeline.
-    - Emits state_update and stats_update for frontend.
-    - Persists scenarios/last_attack_log.json at the end.
+    Drop-in simulate that restricts attacker targets to the user-provided topology nodes.
+    - scenario: dict (from frontend) with 'nodes': [{id: <str>, properties: {...}}, ...]
+    - algo: "mappo" or "ippo"
+    Emits:
+      - state_update (step, reward, nodes, events)
+      - event_occurred (detailed event)
+      - killchain_update
+      - stats_update
+      - demo_done
+      - simulation_error (on exception)
     """
     import os, time, json, random
     import numpy as np
 
-    def _safe_index(pick, idx=0, default=0):
+    # Helper
+    def safe_int(x, default=0):
         try:
-            if hasattr(pick, "__len__"):
-                return int(pick[idx]) if idx < len(pick) else int(pick[0])
-            return int(pick)
+            return int(x)
         except Exception:
             return int(default)
 
-    # MITRE mapping for synthesized events
+    # MITRE & killchain maps (same as before)
     MITRE_ATTACK_MAP = {
         "local_vulnerability": [{"id": "T1190", "name": "Exploit Public-Facing Application"}],
         "remote_vulnerability": [{"id": "T1595", "name": "Active Scanning"}],
@@ -370,8 +371,6 @@ def simulate(scenario, algo):
         "escalation": [{"id": "T1068", "name": "Exploitation for Privilege Escalation"}],
         "impact": [{"id": "T1486", "name": "Data Encrypted for Impact"}],
     }
-
-    # Kill-chain stage mapping
     KILLCHAIN_MAP = {
         "local_vulnerability": "Initial Access",
         "remote_vulnerability": "Reconnaissance",
@@ -381,7 +380,18 @@ def simulate(scenario, algo):
         "impact": "Impact"
     }
 
-    # Setup env & defender if requested
+    # Build user node list from scenario (preserve order)
+    user_nodes = []
+    try:
+        user_nodes = [n.get("id") for n in scenario.get("nodes", []) if n.get("id")]
+    except Exception:
+        user_nodes = []
+
+    if not user_nodes:
+        print("[simulate] Warning: no nodes in scenario — nothing to defend/attack.")
+        # still proceed but attacks will noop
+
+    # Setup env & defender
     env = ScenarioEnv.from_json(scenario)
     print("[app.simulate] Using env:", type(env.cbs.env), " env_id:", getattr(env.cbs, "env_id", None))
 
@@ -403,7 +413,7 @@ def simulate(scenario, algo):
     defender_actions_taken = 0
     total_reward = 0.0
 
-    # reset wrapper/env
+    # reset wrapper/env (wrapper will use the scenario)
     try:
         node_state = env.reset()
         raw_obs = env.cbs.obs
@@ -419,148 +429,182 @@ def simulate(scenario, algo):
 
     try:
         while not done and step < max_steps:
-            # ---------------- Attacker selection (diverse) ----------------
             am = raw_obs.get("action_mask", {}) or {}
-            candidate_types = []
 
-            # gather masks if present and non-empty
-            if am.get("local_vulnerability") is not None:
-                arr = np.array(am["local_vulnerability"])
-                idxs = np.argwhere(arr == 1)
-                if idxs.size:
-                    candidate_types.append(("local_vulnerability", idxs))
-
-            if am.get("remote_vulnerability") is not None:
-                arr = np.array(am["remote_vulnerability"])
-                idxs = np.argwhere(arr == 1)
-                if idxs.size:
-                    candidate_types.append(("remote_vulnerability", idxs))
-
-            if am.get("connect") is not None:
-                arr = np.array(am["connect"])
-                idxs = np.argwhere(arr == 1)
-                if idxs.size:
-                    candidate_types.append(("connect", idxs))
-
-            # add other masks if your env exposes them (probe, noop implicit)
-            # choose a type randomly among candidates (uniform); you can change weighting
-            if candidate_types:
-                chosen_type, chosen_idx_array = candidate_types[np.random.choice(len(candidate_types))]
-                pick = chosen_idx_array[np.random.choice(len(chosen_idx_array))]
-                pick_tuple = tuple(int(x) for x in np.atleast_1d(pick).flatten())
-
-                if chosen_type == "local_vulnerability":
-                    attacker_action = {"local_vulnerability": (int(pick_tuple[0]), int(pick_tuple[1]) if len(pick_tuple) > 1 else 0)}
-                elif chosen_type == "remote_vulnerability":
-                    a = int(pick_tuple[0]) if len(pick_tuple) > 0 else 0
-                    b = int(pick_tuple[1]) if len(pick_tuple) > 1 else 0
-                    c = int(pick_tuple[2]) if len(pick_tuple) > 2 else 0
-                    attacker_action = {"remote_vulnerability": (a, b, c)}
-                elif chosen_type == "connect":
-                    vals = tuple(int(pick_tuple[i]) if i < len(pick_tuple) else 0 for i in range(4))
-                    attacker_action = {"connect": vals}
-                else:
-                    attacker_action = {"noop": 0}
-
-                action_type = chosen_type
-                pick_indices = pick_tuple
-            else:
+            # If no user nodes, attacker will noop
+            if not user_nodes:
                 attacker_action = {"noop": 0}
-                action_type = "noop"
-                pick_indices = None
+                chosen_type = "noop"
+                target_node_idx = None
+            else:
+                # Try to pick a user node and a valid action for it.
+                # We attempt a bounded number of tries to find a valid (type, indices) pair.
+                attacker_action = None
+                chosen_type = None
+                target_node_idx = None
+                attempts = 0
+                MAX_ATTEMPTS = max(3, len(user_nodes) * 2)
 
-            # Debug prints for attacker
-            print("\n" + "="*70)
-            print(f"[ATTACK] Step {step}")
-            print(f"[ATTACK] Candidate types: {[t for t,_ in candidate_types]}")
-            print(f"[ATTACK] Chosen: {action_type}")
-            print(f"[ATTACK] Pick indices: {pick_indices}")
-            print(f"[ATTACK] Payload: {attacker_action}")
+                while attempts < MAX_ATTEMPTS and attacker_action is None:
+                    attempts += 1
+                    # pick a random user node index (maps to CBS host index i)
+                    target_node_idx = random.randrange(len(user_nodes))
+                    # try local_vulnerability first if available
+                    if "local_vulnerability" in am:
+                        try:
+                            arr = np.array(am["local_vulnerability"])
+                            # local_vulnerability typically shape (host_count, k)
+                            if arr.ndim >= 2 and target_node_idx < arr.shape[0]:
+                                choices = np.where(arr[target_node_idx] == 1)[0]
+                                if choices.size:
+                                    vuln_idx = int(np.random.choice(choices))
+                                    attacker_action = {"local_vulnerability": (int(target_node_idx), vuln_idx)}
+                                    chosen_type = "local_vulnerability"
+                                    break
+                        except Exception:
+                            pass
 
-            # best-effort map index -> node name
+                    # try remote_vulnerability: shape usually (host_count, host_count, k)
+                    if "remote_vulnerability" in am and attacker_action is None:
+                        try:
+                            arr = np.array(am["remote_vulnerability"])
+                            # consider actions where source or target equals our chosen host index.
+                            if arr.ndim >= 3 and target_node_idx < arr.shape[0]:
+                                # find any (src,target,vuln) where src==target_node_idx or target==target_node_idx
+                                # prefer src==target_node_idx (attacker launching from this host index)
+                                src_mask = arr[target_node_idx]  # shape (host_count, k)
+                                idxs = np.argwhere(src_mask == 1)
+                                if idxs.size:
+                                    pick = idxs[np.random.choice(len(idxs))]
+                                    target_other = int(pick[0])
+                                    vuln_idx = int(pick[1])
+                                    # remote_vulnerability format expected: (src_idx, dst_idx, vuln_idx)
+                                    attacker_action = {"remote_vulnerability": (int(target_node_idx), target_other, vuln_idx)}
+                                    chosen_type = "remote_vulnerability"
+                                    break
+                                # fallback: look for any entry where dst == target_node_idx
+                                # find src where arr[:, target_node_idx, :] == 1
+                                dst_mask = arr[:, target_node_idx, :] if arr.ndim >= 3 else None
+                                if dst_mask is not None:
+                                    dst_idxs = np.argwhere(dst_mask == 1)
+                                    if dst_idxs.size:
+                                        pick = dst_idxs[np.random.choice(len(dst_idxs))]
+                                        src_idx = int(pick[0])
+                                        vuln_idx = int(pick[1])
+                                        attacker_action = {"remote_vulnerability": (src_idx, int(target_node_idx), vuln_idx)}
+                                        chosen_type = "remote_vulnerability"
+                                        break
+                        except Exception:
+                            pass
+
+                    # try connect if present (shape can be complicated)
+                    if "connect" in am and attacker_action is None:
+                        try:
+                            arr = np.array(am["connect"])
+                            # If connect has host axis as first dimension
+                            if arr.ndim >= 2 and target_node_idx < arr.shape[0]:
+                                # flatten the trailing dims to find a valid tuple for this source host
+                                idxs = np.argwhere(arr[target_node_idx] == 1)
+                                if idxs.size:
+                                    pick = idxs[np.random.choice(len(idxs))]
+                                    # build a tuple of indices depending on dimensionality
+                                    vals = tuple(int(v) for v in np.atleast_1d(pick).flatten())
+                                    # pad/truncate to 4 if required by environment API
+                                    while len(vals) < 4:
+                                        vals = vals + (0,)
+                                    attacker_action = {"connect": (int(target_node_idx),) + vals[:3]}
+                                    chosen_type = "connect"
+                                    break
+                        except Exception:
+                            pass
+
+                    # if nothing valid for this node, next attempt will pick another node
+                # end attempts
+
+                if attacker_action is None:
+                    # fallback noop if nothing valid
+                    attacker_action = {"noop": 0}
+                    chosen_type = "noop"
+                    target_node_idx = None
+
+            # Debug prints
+            print(f"[ATTACK] step={step} chosen_type={chosen_type} target_node_idx={target_node_idx} action={attacker_action}")
+
+            # Map target_node_idx -> user node id string for event mapping
             target_node_name = None
-            try:
-                cbs_nodes = []
-                if hasattr(env.cbs, "get_node_list"):
-                    cbs_nodes = env.cbs.get_node_list()
-                if not cbs_nodes:
-                    try:
-                        with open("scenarios/last_scenario.json") as f:
-                            s_tmp = json.load(f)
-                            cbs_nodes = [{"id": n.get("id")} for n in s_tmp.get("nodes", [])]
-                    except Exception:
-                        cbs_nodes = []
-                if pick_indices is not None and len(cbs_nodes):
-                    idx0 = int(pick_indices[0]) if isinstance(pick_indices, (list, tuple)) else int(pick_indices)
-                    if 0 <= idx0 < len(cbs_nodes):
-                        target_node_name = cbs_nodes[idx0].get("id")
-                        print(f"[ATTACK] Mapped index -> node: {target_node_name}")
-                    else:
-                        print("[ATTACK] Index out of node list range")
-                else:
-                    print("[ATTACK] No node mapping available")
-            except Exception as e:
-                print("[ATTACK] Node mapping error:", e)
+            if target_node_idx is not None and target_node_idx < len(user_nodes):
+                target_node_name = user_nodes[target_node_idx]
 
-            # ---------------- Execute attacker action ----------------
+            # Execute attacker action
             node_state, reward, done, info = env.step(attacker_action)
             raw_obs = env.cbs.obs
             total_reward += float(reward)
 
-            # print environment response
-            print(f"[ENV] Reward: {reward}  Done: {done}")
-            if isinstance(info, dict):
-                print(f"[ENV] Info keys: {list(info.keys())}")
-            else:
-                print(f"[ENV] Info: {info}")
+            print(f"[ENV] step={step} reward={reward} done={done} info_keys={(list(info.keys()) if isinstance(info, dict) else type(info))}")
 
+            # get events from environment (if any)
             events = info.get("events", []) if isinstance(info, dict) else []
-            print(f"[ENV] Events returned: {events}")
+            # translate CBS numeric node references to user node ids if env provided numeric nodes
+            normalized_events = []
+            if events:
+                for e in events:
+                    # if event node is numeric index, try map to user_nodes
+                    node_field = e.get("node")
+                    mapped_node = None
+                    if isinstance(node_field, (int, np.integer)):
+                        if 0 <= int(node_field) < len(user_nodes):
+                            mapped_node = user_nodes[int(node_field)]
+                    elif isinstance(node_field, str) and node_field in user_nodes:
+                        mapped_node = node_field
+                    else:
+                        # fallback to the chosen_target_node_name we computed
+                        mapped_node = target_node_name or node_field
 
-            # If no events from env, synthesize one for UI using MITRE mapping
-            if not events:
-                mitres = MITRE_ATTACK_MAP.get(action_type, [])
+                    e["node"] = mapped_node
+                    normalized_events.append(e)
+            else:
+                # synthesize one event tied to the user node name
+                mitres = MITRE_ATTACK_MAP.get(chosen_type, [])
                 synth = {
                     "time": time.time(),
                     "step": step,
-                    "type": action_type,
+                    "type": chosen_type,
                     "node": target_node_name,
                     "mitre": mitres,
-                    "description": f"Attacker performed {action_type}"
+                    "description": f"Attacker performed {chosen_type} on {target_node_name or 'unknown'}"
                 }
-                events = [synth]
-                print("[ENV] Synthesized event:", synth)
+                normalized_events = [synth]
+                print("[ENV] synthesized event:", synth)
 
-            # Emit events and update log/counters
-            for e in events:
-                # normalize mitre entries
-                mitre_list = e.get("mitre", []) or []
-                normalized_mitre = []
+            # Emit & log events (use user node ids)
+            for e in normalized_events:
+                # normalize mitre format
+                mitre_list = e.get("mitre") or []
+                norm_mitres = []
                 for m in mitre_list:
                     if isinstance(m, str):
-                        normalized_mitre.append({"id": m, "name": ""})
+                        norm_mitres.append({"id": m, "name": ""})
                     elif isinstance(m, dict):
-                        normalized_mitre.append({"id": m.get("id"), "name": m.get("name", "")})
-                e["mitre"] = normalized_mitre
+                        norm_mitres.append({"id": m.get("id"), "name": m.get("name", "")})
+                e["mitre"] = norm_mitres
 
                 attack_entry = {
                     "time": e.get("time", time.time()),
                     "step": e.get("step", step),
                     "type": e.get("type"),
-                    "node": e.get("node") or target_node_name,
+                    "node": e.get("node"),
                     "mitre": e.get("mitre", []),
                     "description": e.get("description", "")
                 }
                 attack_log.append(attack_entry)
-
                 socketio.emit("event_occurred", attack_entry)
 
-                # killchain stage update
-                if e.get("type") in KILLCHAIN_MAP:
-                    socketio.emit("killchain_update", {"stage": KILLCHAIN_MAP[e.get("type")], "step": step, "timestamp": time.time()})
+                # killchain update
+                if attack_entry["type"] in KILLCHAIN_MAP:
+                    socketio.emit("killchain_update", {"stage": KILLCHAIN_MAP[attack_entry["type"]], "step": step, "timestamp": time.time()})
                 else:
-                    if e.get("mitre"):
-                        mid = e["mitre"][0].get("id")
+                    if attack_entry.get("mitre"):
+                        mid = attack_entry["mitre"][0].get("id")
                         for k, v in MITRE_ATTACK_MAP.items():
                             if any(m.get("id") == mid for m in v):
                                 stage = KILLCHAIN_MAP.get(k)
@@ -568,72 +612,61 @@ def simulate(scenario, algo):
                                     socketio.emit("killchain_update", {"stage": stage, "step": step, "timestamp": time.time()})
                                     break
 
-                # success heuristics for attacker
-                if e.get("type") in ("leaked_credentials", "escalation", "credential_use", "impact"):
+                if attack_entry["type"] in ("leaked_credentials", "escalation", "credential_use", "impact"):
                     attacker_successes += 1
                     total_reward -= 6.0
 
-            # ---------------- Defender action (stochastic) ----------------
-            applied = False
-            applied_info = None
-
-            # Exploration probability — sometimes ignore model and do heuristic to diversify actions
+            # ---------------- Defender action (same logic as before) ----------------
             EXPLORE_P = 0.25
-
+            applied = False
             if defender is not None and random.random() > EXPLORE_P:
                 try:
-                    # get logits for agents from your adapter
                     logits_list = defender.act_for_agents([raw_obs] * defender.num_agents)
                     first_logits = logits_list[0] if isinstance(logits_list, (list, tuple)) else logits_list
-
-                    # Map logits -> defense action via your existing helper (keeps compatibility)
                     def_action = logits_to_defense_action(first_logits)
+                    # def_action.node is expected to be a user node id or a string. If it's numeric, map to user_nodes.
                     node = def_action.get("node")
+                    if isinstance(node, (int, np.integer)) and 0 <= int(node) < len(user_nodes):
+                        node = user_nodes[int(node)]
                     defense = def_action.get("defense")
-
                     applied = env.cbs.apply_defense(node, defense)
                     defender_actions_taken += 1
-                    print(f"[DEFEND][MODEL] step={step} node={node} defense={defense} applied={applied}")
-
                     socketio.emit("event_occurred", {"step": step, "type": f"defense_{defense}", "node": node, "mitre": [], "description": f"{defense} applied to {node}"})
                     socketio.emit("killchain_update", {"stage": "Detection/Response", "step": step, "timestamp": time.time()})
-
                     if applied:
                         defender_successes += 1
                         total_reward += 5.0
                 except Exception as e:
                     print("[DEFEND] Model mapping failed:", e)
-                    defender = None  # force fallback next time
+                    defender = None
 
-            # fallback heuristic or exploration branch
             if defender is None or random.random() < EXPLORE_P:
                 try:
                     nodes_for_pick = env.cbs.get_node_list() if hasattr(env.cbs, "get_node_list") else []
-                    if nodes_for_pick:
-                        # choose randomly among top vulnerable nodes (diversify)
-                        sorted_nodes = sorted(nodes_for_pick, key=lambda n: n["properties"].get("vuln_score", 0.0), reverse=True)
+                    # ensure nodes_for_pick ids match user_nodes; pick from user_nodes directly otherwise
+                    candidate_nodes = nodes_for_pick if nodes_for_pick else [{"id": nid} for nid in user_nodes]
+                    if candidate_nodes:
+                        sorted_nodes = sorted(candidate_nodes, key=lambda n: n.get("properties", {}).get("vuln_score", 0.0), reverse=True)
                         candidate_slice = sorted_nodes[:max(1, min(4, len(sorted_nodes)))]
                         chosen = random.choice(candidate_slice)
+                        chosen_id = chosen.get("id")
                         defense_choice = random.choice(["patch", "isolate", "throttle", "monitor"])
-                        applied = env.cbs.apply_defense(chosen["id"], defense_choice)
+                        applied = env.cbs.apply_defense(chosen_id, defense_choice)
                         defender_actions_taken += 1
-                        print(f"[DEFEND][HEUR] step={step} node={chosen['id']} defense={defense_choice} applied={applied}")
-
-                        socketio.emit("event_occurred", {"step": step, "type": f"defense_{defense_choice}", "node": chosen["id"], "mitre": [], "description": f"{defense_choice} applied to {chosen['id']}"})
+                        socketio.emit("event_occurred", {"step": step, "type": f"defense_{defense_choice}", "node": chosen_id, "mitre": [], "description": f"{defense_choice} applied to {chosen_id}"})
                         socketio.emit("killchain_update", {"stage": "Detection/Response", "step": step, "timestamp": time.time()})
                         if applied:
                             defender_successes += 1
                             total_reward += 3.0
                     else:
-                        print("[DEFEND][HEUR] no node list available to pick from")
+                        print("[DEFEND][HEUR] no candidate nodes to pick")
                 except Exception as e:
                     print("[DEFEND][HEUR] error:", e)
 
-            # ---------------- Stats, early stop, emit ----------------
+            # ---------------- Stats, exit conditions, emit ----------------
             try:
                 active = any(n.get("status") in ("under_attack", "compromised") for n in node_state)
             except Exception:
-                # fallback detect signals
                 leaks = raw_obs.get("leaked_credentials") or ()
                 leaks_sum = 0
                 try:
@@ -648,7 +681,7 @@ def simulate(scenario, algo):
                 inactive_steps = 0
 
             if inactive_steps >= 6:
-                print("[simulate] No active threats for several steps -> stopping early")
+                print("[simulate] stopping early (no active threats)")
                 break
 
             stats = {
@@ -657,15 +690,25 @@ def simulate(scenario, algo):
                 "attacker_successes": attacker_successes,
                 "defender_successes": defender_successes,
                 "defender_actions": defender_actions_taken,
-                "success_rate_defender": float(defender_successes / max(1, (defender_actions_taken))) if defender_actions_taken else 0.0,
+                "success_rate_defender": float(defender_successes / max(1, defender_actions_taken)) if defender_actions_taken else 0.0,
                 "success_rate_attacker": float(attacker_successes / max(1, (step + 1))),
             }
+
+            # --- FIX: Ensure node.status always exists ---
+            sanitized_nodes = []
+            for node in node_state:
+                sanitized_nodes.append({
+                    "id": node.get("id"),
+                    "status": node.get("status", "safe"),
+                    "properties": node.get("properties", {})
+                })
+
 
             socketio.emit("state_update", {
                 "step": step,
                 "reward": float(reward),
-                "nodes": node_state,
-                "events": events
+                "nodes": sanitized_nodes,
+                "events": normalized_events
             })
             socketio.emit("stats_update", stats)
 
@@ -695,7 +738,7 @@ def simulate(scenario, algo):
             "attacker_successes": attacker_successes,
             "defender_successes": defender_successes,
             "defender_actions": defender_actions_taken,
-            "success_rate_defender": float(defender_successes / max(1, (defender_actions_taken))) if defender_actions_taken else 0.0,
+            "success_rate_defender": float(defender_successes / max(1, defender_actions_taken)) if defender_actions_taken else 0.0,
             "success_rate_attacker": float(attacker_successes / max(1, (step))) if step else 0.0
         })
 
