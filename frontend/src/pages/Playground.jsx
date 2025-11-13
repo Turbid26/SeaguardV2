@@ -109,6 +109,7 @@ export default function Playgrouund() {
 
   useEffect(() => {
     socket.on("state_update", (data) => {
+      console.log("Received state update:", data);
       setReward(data.reward || 0);
 
       setNodes(prevNodes =>
@@ -120,7 +121,7 @@ export default function Playgrouund() {
           let bg = "#16a34a";
           if (status === "under_attack") bg = "#f59e0b";
           if (status === "compromised") bg = "#dc2626";
-
+          console.log(`Node ${n.id} status: ${status}`);
           return {
             ...n,
             className: status === "compromised" ? "node-compromised" : undefined,

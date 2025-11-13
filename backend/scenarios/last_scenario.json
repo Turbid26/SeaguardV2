@@ -19,8 +19,8 @@
   ],
   "edges": [
     {
-      "source": "HMI_Bridge_1",
-      "target": "HMI_Bridge_2"
+      "source": "HMI_Bridge_2",
+      "target": "HMI_Bridge_1"
     }
   ]
 }

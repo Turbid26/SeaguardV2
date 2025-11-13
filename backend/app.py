@@ -15,7 +15,9 @@ from env_wrapper import ScenarioEnv
 from flask import send_file, send_from_directory
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+import eventlet
 
+eventlet.monkey_patch()
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
@@ -151,7 +153,7 @@ def download_report():
     c.setFillColor(colors.black)
     c.setFont("Helvetica", 9)
     c.drawString(margin, height - 160, f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC")
-    c.drawString(margin, height - 175, f"Algorithm: {summary.get('algo','mixed') if isinstance(summary.get('algo'), str) else 'mixed'}")
+    c.drawString(margin, height - 175, f"Algorithm: MAPPO")
     c.showPage()
 
     # ---------------- Summary / Performance ----------------
@@ -703,11 +705,11 @@ def simulate(scenario, algo):
                     "properties": node.get("properties", {})
                 })
 
-
+            
             socketio.emit("state_update", {
                 "step": step,
                 "reward": float(reward),
-                "nodes": sanitized_nodes,
+                "nodes": node_state,
                 "events": normalized_events
             })
             socketio.emit("stats_update", stats)
