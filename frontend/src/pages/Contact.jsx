@@ -55,23 +55,14 @@ export default function Contact() {
             <p>
               🛠️ GitHub:{" "}
               <a
-                href="https://github.com/your-repo-here"
+                href="https://github.com/Turbid26/SeaguardV2"
                 target="_blank"
                 rel="noreferrer"
               >
-                github.com/your-repo-here
+                https://github.com/Turbid26/SeaguardV2
               </a>
             </p>
-            <p>
-              🌐 Website:{" "}
-              <a
-                href="https://seaguardmarl.ai"
-                target="_blank"
-                rel="noreferrer"
-              >
-                seaguardmarl.ai
-              </a>
-            </p>
+            
           </div>
 
           <h2 className="form-title">Send us a message</h2>
