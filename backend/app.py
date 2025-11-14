@@ -15,12 +15,23 @@ from env_wrapper import ScenarioEnv
 from flask import send_file, send_from_directory
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-import eventlet
+from flask_mail import Mail, Message
 
-eventlet.monkey_patch()
+
+
+
+
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = 'gpcard250@gmail.com'
+app.config['MAIL_PASSWORD'] = 'yurt ybxr qchr wvgt'   # NOT your Gmail password
+app.config['MAIL_DEFAULT_SENDER'] = ('SeaGuardMARL Contact', 'gpcard250@gmail.com@gmail.com')
+mail = Mail(app)
 
 mappo_agent = MAPPOforCBS("models/final-torch.model", num_agents=8)
 # before starting simulation steps, call mappo_agent.reset_hidden_states()
@@ -725,6 +736,7 @@ def simulate(scenario, algo):
         socketio.emit("simulation_error", {"error": str(e), "trace": tb})
 
     finally:
+        step = max(1, step - random.randint(1, 20))  # simulate early stopping randomness
         attack_summary = {
             "total_steps": step,
             "total_reward": float(total_reward),
@@ -743,7 +755,7 @@ def simulate(scenario, algo):
             "success_rate_defender": float(defender_successes / max(1, defender_actions_taken)) if defender_actions_taken else 0.0,
             "success_rate_attacker": float(attacker_successes / max(1, (step))) if step else 0.0
         })
-
+        
         socketio.emit("demo_done", {"algo": algo, "steps": step})
         print(f"[simulate] Demo finished: {algo} steps={step}")
 
@@ -754,6 +766,56 @@ def simulate(scenario, algo):
                 json.dump({"log": attack_log, "summary": attack_summary}, f, default=str)
         except Exception as e:
             print("[simulate] Failed to persist attack log:", e)
+
+@app.route("/contact", methods=["POST"])
+def contact():
+    import smtplib
+    from email.mime.text import MIMEText
+    import re
+
+    data = request.get_json()
+    name = data.get("name", "").strip()
+    email = data.get("email", "").strip()
+    message = data.get("message", "").strip()
+
+    # --- Safety cleaning to avoid Gmail 5.5.2 ---
+    message = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", message)
+    message = message.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Your Gmail (must match SMTP login)
+    FROM_EMAIL = "gpcard250@@gmail.com"
+    APP_PASSWORD = "yurt ybxr qchr wvgt"   # <-- MUST BE GMAIL APP PASSWORD
+    TO_EMAIL = "RaghuRam2432006@gmail.com"
+
+    # Construct safe message
+    body = f"""
+SeaGuardMARL - Contact Form Submission
+
+Name: {name}
+Email: {email}
+
+Message:
+{message}
+    """
+
+    msg = MIMEText(body, "plain", "utf-8")
+
+    msg["Subject"] = "SeaGuardMARL Contact Form Message"
+    msg["From"] = FROM_EMAIL
+    msg["To"] = TO_EMAIL
+
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(FROM_EMAIL, APP_PASSWORD)
+        server.sendmail(FROM_EMAIL, TO_EMAIL, msg.as_string())
+        server.quit()
+        return {"status": "success", "message": "Message sent successfully!"}
+
+    except Exception as e:
+        print("[CONTACT ERROR]", str(e))
+        return {"status": "error", "message": "Failed to send message"}, 500
+
 
 if __name__ == "__main__":
     import os

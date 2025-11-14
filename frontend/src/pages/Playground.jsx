@@ -14,7 +14,11 @@ import "reactflow/dist/style.css";
 import MitreTimeline from "../components/MitreTimeline.jsx";
 import KillChain from "../components/KillChain.jsx";
 
-const socket = io("http://localhost:5000");
+const socket = io("http://localhost:5000", {
+  transports: ["websocket"],
+  upgrade: false
+});
+
 
 const classMap = {
   safe: "node-safe",
@@ -170,9 +174,9 @@ export default function Playgrouund() {
 
     socket.on("demo_done", (data) => {
       let steps = data.steps || 0;
-      if (data.algo === "mappo") steps = Math.floor(Math.random() * 20) + 10;
-      else if (data.algo === "ippo") steps = Math.floor(Math.random() * 20) + 30;
-      alert(`${data.algo.toUpperCase()} completed in ${steps} steps!`);
+      // if (data.algo === "mappo") steps = Math.floor(Math.random() * 20) + 10;
+      // else if (data.algo === "ippo") steps = Math.floor(Math.random() * 20) + 30;
+      alert(`${data.algo.toUpperCase()} completed in ${data.steps} steps!`);
     });
 
     return () => {
@@ -265,7 +269,6 @@ export default function Playgrouund() {
           background: "#10b981", border: "none", borderRadius: 6, color: "white"
         }}>▶ Run Demo</button>
 
-        <div style={{ marginTop: 10 }}>Reward: {reward.toFixed(3)}</div>
 
         <button
             onClick={() => window.open("http://localhost:5000/download_report", "_blank")}
